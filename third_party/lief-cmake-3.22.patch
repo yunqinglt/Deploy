@@ -1,0 +1,9 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,2 +1,4 @@
+-cmake_minimum_required(VERSION 3.24)
++# Android's bundled SDK CMake is 3.22.1. Deploy uses the native/ELF build
++# only; keep this source usable with that toolchain.
++cmake_minimum_required(VERSION 3.22)
+ project(LIEF LANGUAGES C CXX)

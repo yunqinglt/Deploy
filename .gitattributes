@@ -1,0 +1,8 @@
+# Shell scripts must keep LF endings or bash chokes on the shebang and on
+# trailing carriage returns. Java and the Gradle files do not care, so LF
+# everywhere keeps the tree identical across machines.
+* text=auto eol=lf
+
+*.sh text eol=lf
+*.bat text eol=crlf
+*.png binary

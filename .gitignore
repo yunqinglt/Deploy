@@ -1,0 +1,25 @@
+.gradle/
+.gradle-home/
+.tools/
+local.properties
+build/
+.cxx/
+.idea/
+*.iml
+*.log
+__pycache__/
+dist/
+*.apk
+*.aab
+*.so
+*.jks
+*.keystore
+
+# Pinned upstream sources are prepared locally; see third_party/README.md.
+/third_party/LIEF/
+/third_party/capstone/
+
+# Local device evidence and generated architecture samples, not source inputs.
+/smoke-*.json
+/arch-fixtures/
+/docs/*.png
