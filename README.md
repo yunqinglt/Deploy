@@ -1,54 +1,132 @@
 # Deploy
 
-Deploy 是 Android 上的 ELF 符号分析软件及 MCP 服务器。LIEF 负责解析，Capstone
-负责指令级反汇编，Ghidra 11.3.2 生成 AArch64 C 伪代码，Keystone 0.9.2 生成机器码。
-当前版本为 0.4.0，应用运行于独立 UID，不需要 root。
-当前 Activity 是临时服务看板；独立分析前端留待后续开发。
+Deploy 是 Android 上面向 ELF、尤其是 Android Native `.so` 的二进制分析工具，
+同时提供独立的 MCP 服务器。它在设备本地使用 LIEF、Capstone、Ghidra 11.3.2
+和 Keystone 完成 ELF 解析、符号分析、反汇编、C 风格伪代码和机器码生成。
 
-## 仓库布局
+当前版本：**0.4.0**。Deploy 使用独立应用 UID，不声明 `sharedUserId`，自身不需要
+root。与 PosEdMCP 配合时，两款应用通过 AIDL 连接；需要改变目标进程的操作仍由
+PosEdMCP 的确认策略负责。
 
-| 路径 | 职责 |
-| --- | --- |
-| `deploy/` | `dev.deploy` APK：DeployCore、JNI、独立 MCP 与 AIDL 服务 |
-| `deploy-api/` | AIDL 与 MCP 分析参数契约的维护源 |
-| `native-fixture/` | `dev.deploy.fixture` 测试 APK 及测试库 |
-| `docs/MCP_PROMPT.md` | 给连接 Deploy 的 Agent 使用的提示词 |
-| `docs/DEPLOY-NATIVE.md` | 跨应用分析、native 加载契约与真机验收步骤 |
-| `tools/deploy-smoke.py` | 需要两款应用的集成测试，包含可选加载和隔离测试 |
-| `tools/deploy-engines-smoke.py` | 引擎往返、伪代码、内存快照及补丁恢复验收 |
-| `tools/prepare-ghidra.py` | 构建主机 SLEIGH 编译器并生成 Android 语言资产 |
-| `third_party/` | 依赖版本、补丁及本地依赖目录 |
+## 功能
 
-本仓库于 2026-10-10 从 PosEdMCP 的 `deploy-scaffold` 分支、提交
-`7212643ce52ea313cb8bcba43804405f4ca976ef` 提取。工作目录为 `E:/deploy`；
-PosEdMCP 在 `E:/posedmcp` 独立维护其 root、框架桥与加载器。本仓库的构建不需要
-PosEdMCP 源码。原始代码历史仍在 PosEdMCP 仓库，新仓库从本次整理开始记账。
+- 项目管理器：新建项目并导入 `.so` 私有副本，避免原始文件来自可移动存储时失效。
+- 三个项目页面：Decompiler、Assembler、Info & files。
+- 符号树：库 → 符号 → 符号代码；库和符号都可以展开、收回，代码直接挂在对应符号下。
+- 符号分析：同时读取 `.dynsym` 和 `.symtab`，支持动态/静态表选择、名称过滤和分页，
+  保留重复名称及本地符号的 `(table,index)` 身份。
+- 指令级反汇编：支持小端 AArch64、ARM/Thumb、x86 和 x86_64 ELF。
+- C 风格伪代码：使用 Ghidra 原生引擎，目前支持小端 AArch64 ELF。
+- 汇编和字节分析：使用 Keystone 生成机器码，使用 Capstone 解码字节；结果不会自动
+  写入或执行。
+- MCP 与 AIDL：Deploy 自己提供本地 MCP；项目界面和 PosEdMCP 都通过同一 `DeployCore`
+  进入分析后端。
+- `.so` 文件关联：注册 `application/x-sharedlib`，可由文件管理器交给 Deploy。
 
-PosEdMCP 保留 `deploy-api/` 的契约副本，两个项目分别构建自己的 APK，运行时经 Binder
-连接。修改契约时按 [deploy-api/README.md](deploy-api/README.md) 同步并验证两端。
+## 工作方式
+
+```mermaid
+flowchart LR
+    UI[Deploy 项目前端] --> Core[DeployCore]
+    MCP[Deploy MCP<br/>127.0.0.1:4177] --> Core
+    Pos[PosEdMCP] -->|AIDL| Core
+    Core --> LIEF[LIEF ELF 解析]
+    Core --> Capstone[Capstone 反汇编]
+    Core --> Ghidra[Ghidra 伪代码]
+    Core --> Keystone[Keystone 汇编]
+```
+
+Deploy 直接分析它能够读取的设备文件，例如 `/sdcard/` 下的库。它不会共享 PosEdMCP
+的 UID，也不会因为 AIDL 连接而获得 root 或目标应用私有目录的读取权限。
+
+安装 Deploy 后，打开 Settings，授予需要的文件访问权限并点击 **Start service**。
+独立 MCP 端点为：
+
+```text
+http://127.0.0.1:4177/mcp
+```
+
+请求使用 Deploy Settings 页显示的 Bearer token；`/health` 只表示 HTTP 服务存活，
+不代表某个文件可读或已经解析成功。完整的 Agent 使用规则见
+[docs/MCP_PROMPT.md](docs/MCP_PROMPT.md)。
+
+常用分析顺序是：先调用 `deploy_status`，再用 `deploy_analyze` 的 `overview` 确认
+ELF 架构，随后按需查询 `symbols`、`resolve`、`disasm` 或 `decompile`。
+
+```json
+{
+  "path": "/sdcard/libexample.so",
+  "op": "symbols",
+  "table": "all",
+  "query": "JNI",
+  "max": 100
+}
+```
+
+`symbols` 的后续页通过返回的 `nextOffset` 读取。地址字段是加载前的 ELF 虚拟地址，
+不是文件偏移，也不是包含 ASLR 的运行时地址。
+
+## 与 PosEdMCP 协作
+
+PosEdMCP 是独立的特权应用和 MCP 服务器，源代码位于另一个仓库。它可以通过 AIDL
+使用 Deploy 的以下能力：
+
+- 为指定 ELF 文件创建只读快照并分析；
+- 生成汇编字节或分析内存快照；
+- 将已确认的运行时请求交给 PosEdMCP 自己的目标进程桥。
+
+运行时加载、目标进程内存读取和单条 ARM64 指令修改都属于 PosEdMCP 的工具，受其
+确认闸门、作用域和目标进程检查约束。Deploy 自身不直接加载其他应用的 native 库，
+不提供 root、shell 或持久 native hook。
+
+两款应用可以单独运行：
+
+- 只有 Deploy：继续分析可读的 `/sdcard/` 文件；提权和目标进程操作不可用。
+- 只有 PosEdMCP：原有提权服务继续工作，并报告 Deploy 辅助应用不可用。
+- 两者同时运行：PosEdMCP 增加 Deploy 分析和经过确认的运行时协作能力。
+
+ColorOS / HyperOS 用户可以在 PosEdMCP 的特殊设置中启用“帮助Deploy”钩子，降低已
+知后台清理路径对 Deploy 的影响。该开关默认关闭，具体 ROM 版本仍可能需要用户手动
+允许后台运行或重启系统。
+
+## 已知限制
+
+- 伪代码是引擎推断结果，不是原始 C/C++ 源码。当前仅支持小端 AArch64。
+- 伪代码默认指令预算为 20,000，允许提高到 100,000；单次默认工作期限为 30 秒，
+  可指定 1–120 秒。复杂或很长的函数仍可能返回 `DECOMPILER_TIMEOUT`，此时应使用
+  `disasm` 按页读取 ASM。ASM 不依赖伪代码是否成功。
+- 如果 ELF 没有 `.symtab`，被剥除的内部函数名无法从 `.dynsym` 凭空恢复；
+  `defined:false` 的符号是外部导入，其实现不在当前文件中。
+- 线性反汇编不会恢复完整控制流，也不会验证或执行指令。汇编只表示机器码生成成功，
+  不表示机器码适合写入目标进程。
+- 当前不包含持久 native hook、inline/PLT hook 或 LIEF 离线改写、部署和回滚工作流。
 
 ## 构建
 
-需要 JDK 17 或更高（本地使用 22）、Gradle 8.14.3、Android SDK 36、
-NDK 28.2.13676358、CMake 3.22.1。先按
-[third_party/README.md](third_party/README.md) 准备固定版本的依赖，
-并在主机 C++ 编译环境中运行 `python tools/prepare-ghidra.py` 生成 Ghidra 语言资产。
-APK 当前只打包 `arm64-v8a`；Capstone 可分析的 ELF 架构与 APK 自身 ABI 是两回事。
+需要：
 
-在仓库根目录创建不纳入 Git 的 `local.properties`，例如：
+- JDK 17 或更高版本；
+- Android SDK 36；
+- Android NDK 28.2.13676358；
+- CMake 3.22.1；
+- Gradle 8.14.3；
+- `third_party/README.md` 中列出的固定版本依赖。
+
+先准备依赖，并运行 `tools/prepare-ghidra.py` 生成 Ghidra 语言资产。然后在仓库根目录
+创建不纳入 Git 的 `local.properties`：
 
 ```properties
 sdk.dir=E\:/SDK
 ```
 
-Git Bash 下可沿用项目自带的 Gradle 下载器和启动器：
+Linux / Git Bash：
 
 ```bash
 bash tools/bootstrap-gradle.sh
 bash tools/gradle.sh :deploy:assembleDebug :native-fixture:assembleDebug
 ```
 
-PowerShell 下，准备好同一 Gradle 发行包后运行：
+PowerShell：
 
 ```powershell
 $env:JAVA_HOME = 'C:/Program Files/Java/jdk-22'
@@ -56,56 +134,44 @@ $env:GRADLE_USER_HOME = "$PWD/.gradle-home"
 & ./.tools/gradle-8.14.3/bin/gradle.bat :deploy:assembleDebug :native-fixture:assembleDebug
 ```
 
-Gradle 发行包可从 `https://services.gradle.org/distributions/gradle-8.14.3-bin.zip`
-下载，解压到 `.tools/`。Windows 上建议将工程和 Gradle 缓存放在 ASCII 路径。
-代理按本机环境配置，不将凭据或机器配置提交到 Git。
+APK 输出为：
 
-输出分别是 `deploy/build/outputs/apk/debug/deploy-debug.apk` 和
-`native-fixture/build/outputs/apk/debug/native-fixture-debug.apk`。
-Fixture 只用于测试，无需随 Deploy 安装。
+```text
+deploy/build/outputs/apk/debug/deploy-debug.apk
+native-fixture/build/outputs/apk/debug/native-fixture-debug.apk
+```
 
-## 使用与协作
+Deploy 当前打包 `arm64-v8a`。APK 的 ABI 与它能够解析的 ELF 架构是两个独立概念。
+`native-fixture` 仅用于集成测试，无需随 Deploy 安装。
 
-打开 Deploy，授予分析 `/sdcard/` 文件所需的“所有文件访问”权限并启动服务。
-独立 MCP 为 `http://127.0.0.1:4177/mcp`，使用 Deploy 看板提供的 Bearer token；
-`/health` 只用于探活。Agent 提示词见 [docs/MCP_PROMPT.md](docs/MCP_PROMPT.md)。
+## 仓库结构
 
-- 仅 Deploy：可直接分析可读 ELF，无 root 或进程加载工具。
-- 仅 PosEdMCP：原有特权服务保持可用，Deploy 工具报告辅助应用缺失或不可达。
-- 两者共存：PosEdMCP 的分析工具经 AIDL 调用 Deploy；`deploy_load_native` 经
-  PosEdMCP 确认策略，将已校验库送入一个精确指定的作用域应用进程。
-- Deploy 的 `deploy_assemble` / `deploy_analyze_bytes` 支持小端 ARM64、ARM、Thumb、
-  x86 和 x86_64，只生成/解码字节。Ghidra 反编译在私有工作进程执行，默认单次上限 30 秒，可选择 1–120 秒。
-- PosEdMCP 的 `deploy_disasm_memory` 读取目标进程 1–4096 字节并以只读 FD 经 AIDL 解码；
-  `deploy_patch_memory` 经确认和旧字节校验替换一条 ARM64 指令，并恢复页权限。
-- PosEdMCP 特殊设置提供 ColorOS / HyperOS 的“帮助Deploy”开关，针对已知后台清理路径。
-  默认关闭；更新后的 system_server 模块通常需重启设备才能加载。
+| 路径 | 作用 |
+| --- | --- |
+| `deploy/` | `dev.deploy` APK、项目界面、MCP 服务、AIDL 服务和 native 后端 |
+| `deploy-api/` | AIDL 与分析参数契约的维护源 |
+| `native-fixture/` | `dev.deploy.fixture` 测试 APK 及测试库 |
+| `docs/MCP_PROMPT.md` | 连接 Deploy 的 Agent 使用规则 |
+| `docs/DEPLOY-NATIVE.md` | 原生后端、跨应用接口和真机验收说明 |
+| `tools/deploy-analysis-regression.py` | 符号分页和长函数分析回归测试 |
+| `tools/deploy-smoke.py` | 两款应用的集成与隔离测试 |
+| `tools/deploy-engines-smoke.py` | 反汇编、伪代码、内存快照和补丁恢复测试 |
+| `tools/prepare-ghidra.py` | 生成 Ghidra SLEIGH 语言资产 |
+| `third_party/` | 固定版本依赖、补丁和准备说明 |
 
-Fixture 的构造函数记录 PID，`deploy_fixture_probe()` 返回该 PID，
-`deploy_fixture_answer()` 返回 42，`deploy_fixture_calculate(x)` 包含条件/算术，
-`deploy_fixture_patchpoint()` 提供可恢复的 `mov x0,#7; ret` 测试入口。
-Activity 不自行加载库或模拟桥接。
-真实加载测试需要在 LSPosed/Vector 的 PosEdMCP 作用域中选择 Fixture；
-详见 [集成测试步骤](docs/DEPLOY-NATIVE.md#device-verification)。
+修改 `deploy-api/` 后，需要将相同的契约文件同步到 PosEdMCP，并分别构建两端。具体
+规则见 [deploy-api/README.md](deploy-api/README.md)。
 
-## 进度与历史记录
+## 文档与验证
 
-[DESIGN.md](DESIGN.md) 是当前架构与后续方向，
-[MILESTONE-REPORT.md](MILESTONE-REPORT.md) 记录迁移前的真机验收。
-`DESIGN-initial-shared-uid.md` 仅为已废弃方案的历史存档。
-原始 `smoke-*.json`、日志、测试 `.so` 和生成样本留在本地并由 Git 忽略。
-0.4.0 的验证记录见 [MILESTONE-0.4.md](MILESTONE-0.4.md)。五种汇编/缓冲区解码模式
-均在 arm64 手机通过往返；这不代表其他架构设备上的执行验证。
-一加 Android 16 的 Hans 保活修复、RikkaHub 连接和隔离回归见
-[MILESTONE-COLOROS.md](MILESTONE-COLOROS.md)。
+- [当前设计与进度](DESIGN.md)
+- [原生分析与跨应用接口](docs/DEPLOY-NATIVE.md)
+- [MCP 提示词](docs/MCP_PROMPT.md)
+- [0.4.0 里程碑](MILESTONE-0.4.md)
+- [ColorOS / HyperOS 相关验收](MILESTONE-COLOROS.md)
+- [符号分析与项目树回归记录](docs/ANALYSIS-UX-REGRESSION.md)
 
-自用项目，尚未选择项目许可证。第三方库分别遵循其上游许可证。
+测试库和真机日志不会提交到仓库。每轮工作完成后整理 Git 并创建本地提交；默认不
+自动推送到远程仓库。
 
-Deploy 的独立前端以项目为工作单位：用户新建项目并导入 `.so` 私有副本，项目页包含
-反编译、相对地址汇编、项目信息与文件列表三个 Tab。MCP 服务器配置位于 Settings，
-而不是分析首页；`.so` 文件通过 `application/x-sharedlib` MIME 可由文件管理器交给 Deploy。
-
-
-项目树支持库与符号的展开/收起，C/ASM 代码是符号的子节点。
-符号列表同时包含动态/静态表，支持名称过滤与分页；导入符号单独说明其外部实现。
-长函数默认指令预算 20000，可重试至 100000；ASM 可以逐页读到已知函数末尾。
+本项目尚未选择项目许可证；第三方库分别遵循其上游许可证。
