@@ -69,6 +69,20 @@ public final class DeployCore {
      */
     public JSONObject analyze(String path, String op, JSONObject args) throws JSONException {
         if (args == null) args = new JSONObject();
+        if ("symbols".equals(op)) {
+            JSONObject normalized = new JSONObject();
+            String table = args.optString("table", "all");
+            if (!java.util.Arrays.asList("all", "dynamic", "static").contains(table))
+                throw new IllegalArgumentException("table must be all, dynamic or static");
+            normalized.put("table", table);
+            normalized.put("max", boundedInt(args, "max", 2000, 1, 20000));
+            normalized.put("pageOffset", String.valueOf(boundedInt(args, "offset", 0, 0, Integer.MAX_VALUE)));
+            String query = args.optString("query", "");
+            if (query.length() > 512 || query.indexOf('\0') >= 0)
+                throw new IllegalArgumentException("query must be at most 512 characters and contain no NUL");
+            normalized.put("query", query);
+            return new JSONObject(nativeAnalyze(op, path, normalized.toString()));
+        }
         if ("decompile".equals(op)) {
             return DecompilerClient.analyze(path, args);
         }
@@ -93,7 +107,7 @@ public final class DeployCore {
         String name = args.optString("name", ""), address = args.optString("address", "");
         if (name.isEmpty() == address.isEmpty()) throw new IllegalArgumentException("decompile requires exactly one of name or address");
         if (!address.isEmpty()) requireAddress(address);
-        int max = boundedInt(args, "max", 4096, 1, 20000);
+        int max = boundedInt(args, "max", 20000, 1, 100000);
         return new JSONObject(nativeDecompile(path, name, address, GhidraSpecs.directory(), max));
     }
 

@@ -58,6 +58,9 @@ ghidra_sources(GHIDRA_SOURCES ${GHIDRA_CORE} ${GHIDRA_SLEIGH} ${GHIDRA_DECOMP})
 # An object library retains the static capability registrations used by PrintC.
 add_library(deployghidra OBJECT ${GHIDRA_SOURCES})
 target_compile_features(deployghidra PRIVATE cxx_std_17)
+# Large-function analysis is dominated by Ghidra's graph/SSA passes. Android
+# debug builds otherwise use -O0 and hit the worker deadline on real libraries.
+target_compile_options(deployghidra PRIVATE -O2)
 target_include_directories(deployghidra PUBLIC "${GHIDRA_CPP}")
 
 # The analysis backend. LIEF is statically linked into this JNI library so the

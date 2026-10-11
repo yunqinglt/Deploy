@@ -20,13 +20,21 @@ public:
     explicit ElfImage(const Binary& b) : LoadImage("deploy-elf"), binary(b) {}
     void loadFill(uint1* out, int4 count, const Address& address) override {
         uint64_t va = address.getOffset();
+        const uint64_t first = va;
         while (count > 0) {
             const Segment* found = nullptr;
             for (const auto& seg : binary.segments()) {
                 if (seg.type() == Segment::TYPE::LOAD && va >= seg.virtual_address()
                         && va - seg.virtual_address() < seg.virtual_size()) { found = &seg; break; }
             }
-            if (!found) throw DataUnavailError("Unmapped ELF address " + deploy::hex(va));
+            if (!found) {
+                // SLEIGH reads a 16-byte lookahead even for the final 4-byte
+                // instruction. Match RawLoadImage: only pad after real bytes;
+                // a request starting at an unmapped address still fails.
+                if (va == first) throw DataUnavailError("Unmapped ELF address " + deploy::hex(va));
+                std::memset(out, 0, count);
+                return;
+            }
             const uint64_t offset = va - found->virtual_address();
             size_t size = std::min<uint64_t>(count, found->virtual_size() - offset);
             auto data = found->content();
@@ -96,13 +104,23 @@ std::string decompile(const std::string& path, const std::string& name,
     arch.flowoptions |= FlowInfo::error_toomanyinstructions;
     auto* fd = arch.symboltab->getGlobalScope()->addFunction(Address(arch.getDefaultCodeSpace(), start), function)->getFunction();
     arch.allacts.getCurrent()->reset(*fd);
-    if (arch.allacts.getCurrent()->perform(*fd) < 0) throw std::runtime_error("decompiler stopped before completion");
+    try {
+        if (arch.allacts.getCurrent()->perform(*fd) < 0)
+            throw std::runtime_error("decompiler stopped before completion");
+    } catch (const LowlevelError& e) {
+        if (e.explain.find("maximum allowable instructions") != std::string::npos)
+            return "{\"error\":\"Function exceeds the instruction budget; retry with a larger max or inspect ASM pages.\","
+                "\"code\":\"DECOMPILE_INSTRUCTION_LIMIT\",\"instructionLimit\":" + std::to_string(maxInstructions)
+                + ",\"maxInstructionLimit\":100000,\"complete\":false}";
+        throw;
+    }
     arch.print->setOutputStream(&output);
     arch.print->setMarkup(false);
     arch.print->docFunction(fd);
     if (output.str().size() > 262144) throw std::runtime_error("pseudocode exceeds output limit");
     return "{\"backend\":\"ghidra\",\"engineVersion\":\"11.3.2\",\"op\":\"decompile\",\"path\":" + deploy::quote(path)
         + ",\"name\":" + deploy::quote(function) + ",\"address\":" + deploy::quote(deploy::hex(start))
+        + ",\"instructionLimit\":" + std::to_string(maxInstructions)
         + ",\"addressKind\":\"elf_virtual_address\",\"language\":\"C\",\"pseudocode\":" + deploy::quote(output.str())
         + ",\"warnings\":" + deploy::quote(warnings.str())
         + ",\"note\":\"Types and prototypes are inferred. This is pseudocode, not original source or execution evidence.\"}";

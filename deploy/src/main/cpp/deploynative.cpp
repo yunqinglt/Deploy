@@ -17,6 +17,7 @@
 #include <string>
 #include <string_view>
 #include <stdexcept>
+#include <vector>
 
 #include <LIEF/ELF.hpp>
 #include <capstone/capstone.h>
@@ -211,27 +212,50 @@ static void appendSymbol(std::string& out, const Symbol& symbol, const Binary& b
     out += "}";
 }
 
+// Java validates and normalizes these arguments before JNI.
 static std::string symbols(const std::string& path, std::string_view args) {
     uint64_t size = 0;
-    if (!fileSize(path, &size)) {
-        return "{\"path\":" + jsonString(path) + ",\"exists\":false}";
-    }
+    if (!fileSize(path, &size)) return "{\"error\":\"no such file or unreadable\"}";
     const auto binary = parseBinary(path);
-    if (!binary) return commonPrefix(path, size) + ",\"elf\":false}";
+    if (!binary) return "{\"error\":\"LIEF could not parse this ELF\"}";
     const size_t limit = jsonLimit(args);
-    std::string out = commonPrefix(path, size) + ",\"count\":"
-            + std::to_string(binary->dynamic_symbols().size()) + ",\"symbols\":[";
-    size_t count = 0;
-    for (const Symbol& symbol : binary->dynamic_symbols()) {
-        if (count++ >= limit) break;
-        appendSymbol(out, symbol, *binary);
+    const std::string table = jsonArgument(args, "table");
+    const std::string query = jsonArgument(args, "query");
+    const size_t offset = std::stoull(jsonArgument(args, "pageOffset"));
+    struct Entry { const Symbol* symbol; const char* table; size_t index; };
+    std::vector<Entry> entries;
+    auto collect = [&](const auto& symbols, const char* source) {
+        size_t index = 0;
+        for (const Symbol& symbol : symbols) {
+            if (query.empty() || symbol.name().find(query) != std::string::npos)
+                entries.push_back({&symbol, source, index});
+            ++index;
+        }
+    };
+    if (table != "static") collect(binary->dynamic_symbols(), "dynamic");
+    if (table != "dynamic") collect(binary->symtab_symbols(), "static");
+    // Keep both table entries, including aliases and duplicate names. Their
+    // (table,index) identity is stable across pages and does not lose locals.
+    std::string out = commonPrefix(path, size) + ",\"count\":" + std::to_string(entries.size())
+        + ",\"dynamicSymbols\":" + std::to_string(binary->dynamic_symbols().size())
+        + ",\"staticSymbols\":" + std::to_string(binary->symtab_symbols().size())
+        + ",\"table\":" + jsonString(table) + ",\"offset\":" + std::to_string(offset)
+        + ",\"symbols\":[";
+    size_t next = std::min(offset, entries.size());
+    for (; next < entries.size() && next - offset < limit; ++next) {
+        // Leave headroom in Android Binder's shared transaction buffer.
+        if (out.size() >= 180000 && next > offset) break;
+        const auto& entry = entries[next];
+        appendSymbol(out, *entry.symbol, *binary);
+        out.pop_back();
+        out += ",\"table\":" + jsonString(entry.table) + ",\"index\":" + std::to_string(entry.index) + "}";
     }
-    out += "]";
-    if (binary->dynamic_symbols().size() > limit) {
-        out += ",\"truncated\":true,\"limit\":" + std::to_string(limit);
-    }
-    out += "}";
-    return out;
+    out += "],\"returned\":" + std::to_string(next - std::min(offset, entries.size()))
+        + ",\"truncated\":" + (next < entries.size() ? "true" : "false")
+        + ",\"nextOffset\":" + (next < entries.size() ? std::to_string(next) : "null");
+    if (binary->symtab_symbols().empty())
+        out += ",\"note\":\"No static symbol table: stripped/local function names cannot be recovered from the dynamic table. Undefined symbols are imports, with no body in this file.\"";
+    return out + "}";
 }
 
 static std::string relocations(const std::string& path, std::string_view args) {

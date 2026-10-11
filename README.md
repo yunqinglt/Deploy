@@ -75,7 +75,7 @@ Fixture 只用于测试，无需随 Deploy 安装。
 - 两者共存：PosEdMCP 的分析工具经 AIDL 调用 Deploy；`deploy_load_native` 经
   PosEdMCP 确认策略，将已校验库送入一个精确指定的作用域应用进程。
 - Deploy 的 `deploy_assemble` / `deploy_analyze_bytes` 支持小端 ARM64、ARM、Thumb、
-  x86 和 x86_64，只生成/解码字节。Ghidra 反编译在私有工作进程执行，单次上限 30 秒。
+  x86 和 x86_64，只生成/解码字节。Ghidra 反编译在私有工作进程执行，默认单次上限 30 秒，可选择 1–120 秒。
 - PosEdMCP 的 `deploy_disasm_memory` 读取目标进程 1–4096 字节并以只读 FD 经 AIDL 解码；
   `deploy_patch_memory` 经确认和旧字节校验替换一条 ARM64 指令，并恢复页权限。
 - PosEdMCP 特殊设置提供 ColorOS / HyperOS 的“帮助Deploy”开关，针对已知后台清理路径。
@@ -104,3 +104,8 @@ Activity 不自行加载库或模拟桥接。
 Deploy 的独立前端以项目为工作单位：用户新建项目并导入 `.so` 私有副本，项目页包含
 反编译、相对地址汇编、项目信息与文件列表三个 Tab。MCP 服务器配置位于 Settings，
 而不是分析首页；`.so` 文件通过 `application/x-sharedlib` MIME 可由文件管理器交给 Deploy。
+
+
+项目树支持库与符号的展开/收起，C/ASM 代码是符号的子节点。
+符号列表同时包含动态/静态表，支持名称过滤与分页；导入符号单独说明其外部实现。
+长函数默认指令预算 20000，可重试至 100000；ASM 可以逐页读到已知函数末尾。

@@ -31,16 +31,20 @@ import com.google.android.material.card.MaterialCardView;
 import com.google.android.material.color.DynamicColors;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.google.android.material.tabs.TabLayout;
+import com.google.android.material.textfield.TextInputLayout;
+import com.google.android.material.textfield.TextInputEditText;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.ArrayList;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.text.DateFormat;
 import java.util.Date;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 
 import dev.deploy.core.DeployCore;
 import dev.deploy.project.ProjectStore;
@@ -66,13 +70,9 @@ public final class DeployActivity extends AppCompatActivity {
     private FrameLayout projectContentHost;
     private int projectTab;
     private String activeFilePath;
-    private String activeSymbol;
-    private boolean showC = true;
-    private final Map<String, JSONArray> symbolCache = new HashMap<>();
-    private LinearLayout codeHost;
-    private LinearLayout symbolsHost;
-    private TextView codeOutput;
-    private int codeGeneration;
+    private int viewGeneration;
+    private final List<LibraryNode> libraries = new ArrayList<>();
+    private final ExecutorService analysisWorkers = Executors.newFixedThreadPool(2);
     private EditText assemblyAddress;
     private EditText assemblySource;
     private Spinner assemblyArch;
@@ -138,6 +138,7 @@ public final class DeployActivity extends AppCompatActivity {
     // ---- project manager --------------------------------------------------
 
     private void renderHome() {
+        invalidateAnalysis();
         currentProject = null;
         toolbar.setTitle("Deploy");
         toolbar.setNavigationIcon(null);
@@ -154,8 +155,8 @@ public final class DeployActivity extends AppCompatActivity {
             if (values.isEmpty()) showNewProjectDialog(null);
             else chooseProjectForImport(null);
         }));
-        actions.addView(outlined("Settings", v -> renderSettings()));
         page.addView(actions);
+        page.addView(outlined("Settings", v -> renderSettings()));
 
         List<ProjectStore.Project> values = projects.all();
         if (values.isEmpty()) {
@@ -188,16 +189,23 @@ public final class DeployActivity extends AppCompatActivity {
     }
 
     private void showNewProjectDialog(Uri importAfterCreate) {
-        EditText name = new EditText(this);
-        name.setHint("Project name");
+        LinearLayout inputContainer = new LinearLayout(this);
+        inputContainer.setOrientation(LinearLayout.VERTICAL);
+        inputContainer.setPadding(dp(24), dp(16), dp(24), dp(8));
+        TextInputLayout nameField = new TextInputLayout(this, null,
+                com.google.android.material.R.attr.textInputOutlinedStyle);
+        nameField.setHint("Project name");
+        TextInputEditText name = new TextInputEditText(nameField.getContext());
         name.setSingleLine(true);
         name.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
-        int pad = dp(24);
-        name.setPadding(pad, dp(8), pad, 0);
+        nameField.addView(name, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        inputContainer.addView(nameField, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         MaterialAlertDialogBuilder dialog = new MaterialAlertDialogBuilder(this)
                 .setTitle("New project")
                 .setMessage("Give the native analysis workspace a name.")
-                .setView(name)
+                .setView(inputContainer)
                 .setNegativeButton("Cancel", null)
                 .setPositiveButton("Create", null);
         androidx.appcompat.app.AlertDialog shown = dialog.create();
@@ -277,7 +285,6 @@ public final class DeployActivity extends AppCompatActivity {
         currentProject = projects.byId(project.id);
         activeFilePath = currentProject == null || currentProject.firstFile() == null
                 ? null : currentProject.firstFile().path;
-        activeSymbol = null;
         projectTab = 0;
         renderProject();
     }
@@ -316,12 +323,13 @@ public final class DeployActivity extends AppCompatActivity {
         // TabLayout selects the first tab while it is being populated. That
         // selection happens before the content host exists, so explicitly
         // render the initial tab instead of relying on a second select event.
-        projectTabs.getTabAt(projectTab).select();
-        renderProjectTab();
+        if (projectTabs.getSelectedTabPosition() == projectTab) renderProjectTab();
+        else projectTabs.getTabAt(projectTab).select();
     }
 
     private void renderProjectTab() {
         if (projectContentHost == null) return;
+        invalidateAnalysis();
         projectContentHost.removeAllViews();
         if (projectTab == 0) renderDecompiler();
         else if (projectTab == 1) renderAssembler();
@@ -331,116 +339,270 @@ public final class DeployActivity extends AppCompatActivity {
     private void renderDecompiler() {
         LinearLayout page = page();
         page.addView(headline("Decompiler"));
-        page.addView(body("Expand a library, choose a symbol, then switch between the C-like"
-                + " pseudocode and Capstone assembly returned by Deploy."));
-        symbolsHost = new LinearLayout(this);
-        symbolsHost.setOrientation(LinearLayout.VERTICAL);
-        page.addView(symbolsHost);
-        codeHost = new LinearLayout(this);
-        codeHost.setOrientation(LinearLayout.VERTICAL);
-        page.addView(codeHost);
+        page.addView(body("Tap a library or symbol to expand it. Tap again to collapse."));
         if (currentProject.files.isEmpty()) {
-            page.addView(section("NO LIBRARIES"));
             page.addView(body("Import a .so from Info & files to begin."));
         } else {
-            page.addView(section("LIBRARIES → SYMBOLS"));
+            page.addView(section("LIBRARIES → SYMBOLS → CODE"));
             for (ProjectStore.FileEntry file : currentProject.files) {
-                MaterialButton fileButton = tonal(file.name, v -> selectFile(file));
-                fileButton.setGravity(Gravity.START);
-                symbolsHost.addView(fileButton);
-                if (file.path.equals(activeFilePath)) renderSymbols(file);
+                LibraryNode node = new LibraryNode(file);
+                libraries.add(node);
+                page.addView(node.root);
+                if (file.path.equals(activeFilePath)) node.toggle();
             }
         }
         projectContentHost.addView(scrolled(page));
-        if (activeSymbol != null && activeFilePath != null) {
-            loadCode(activeFilePath, activeSymbol, showC);
+    }
+
+    /** Nodes own their child views; expanding never rebuilds the entire tree. */
+    private final class LibraryNode {
+        final ProjectStore.FileEntry file;
+        final int generation = viewGeneration;
+        final LinearLayout root = column();
+        final LinearLayout children = column();
+        final MaterialButton toggle;
+        int request;
+        boolean expanded;
+        String query = "";
+        String table = "all";
+        final List<SymbolNode> nodes = new ArrayList<>();
+
+        LibraryNode(ProjectStore.FileEntry file) {
+            this.file = file;
+            toggle = treeButton("▸ " + file.name, v -> toggle());
+            root.addView(toggle);
+            indent(children, 12);
+            children.setVisibility(View.GONE);
+            root.addView(children);
         }
-    }
 
-    private void selectFile(ProjectStore.FileEntry file) {
-        activeFilePath = file.path;
-        activeSymbol = null;
-        renderProjectTab();
-    }
+        void toggle() {
+            expanded = !expanded;
+            toggle.setText((expanded ? "▾ " : "▸ ") + file.name);
+            toggle.setContentDescription((expanded ? "Collapse " : "Expand ") + file.name);
+            children.setVisibility(expanded ? View.VISIBLE : View.GONE);
+            request++;
+            cancelCode();
+            children.removeAllViews();
+            if (expanded) {
+                activeFilePath = file.path;
+                loadPage(0);
+            } else if (file.path.equals(activeFilePath)) activeFilePath = null;
+        }
 
-    private void renderSymbols(ProjectStore.FileEntry file) {
-        JSONArray cached = symbolCache.get(file.path);
-        if (cached == null) {
-            symbolsHost.addView(caption("Loading symbols…"));
-            int generation = ++codeGeneration;
-            new Thread(() -> {
-                JSONObject result = analyze(file.path, "symbols", jsonArgs("max", 512));
+        void cancelCode() {
+            for (SymbolNode node : nodes) node.cancel();
+            nodes.clear();
+        }
+
+        void loadPage(int offset) {
+            cancelCode();
+            final int ticket = ++request;
+            children.removeAllViews();
+            children.addView(caption("Loading symbols…"));
+            JSONObject args = jsonArgs("max", 100);
+            try { args.put("offset", offset).put("query", query).put("table", table); }
+            catch (Exception ignored) { }
+            analysisWorkers.execute(() -> {
+                JSONObject result = analyze(file.path, "symbols", args);
                 runOnUiThread(() -> {
-                    if (generation != codeGeneration || currentProject == null) return;
+                    if (generation != viewGeneration || ticket != request || !expanded) return;
+                    children.removeAllViews();
+                    EditText search = new EditText(DeployActivity.this);
+                    search.setSingleLine(true);
+                    search.setHint("Filter symbol names");
+                    search.setText(query);
+                    children.addView(search);
+                    Spinner tables = new Spinner(DeployActivity.this);
+                    tables.setAdapter(new ArrayAdapter<>(DeployActivity.this,
+                            android.R.layout.simple_spinner_dropdown_item,
+                            new String[]{"all", "dynamic", "static"}));
+                    tables.setSelection(table.equals("static") ? 2 : table.equals("dynamic") ? 1 : 0);
+                    children.addView(tables);
+                    children.addView(tonal("Apply filter", v -> {
+                        query = search.getText().toString().trim();
+                        table = String.valueOf(tables.getSelectedItem());
+                        loadPage(0);
+                    }));
                     if (result.has("error")) {
-                        symbolsHost.removeAllViews();
-                        symbolsHost.addView(caption("Could not list symbols: " + result.optString("error")));
+                        children.addView(body(result.optString("error")));
+                        children.addView(tonal("Retry", v -> loadPage(offset)));
                         return;
                     }
-                    JSONArray symbols = result.optJSONArray("symbols");
-                    symbolCache.put(file.path, symbols == null ? new JSONArray() : symbols);
-                    renderProjectTab();
+                    int total = result.optInt("count");
+                    JSONArray values = result.optJSONArray("symbols");
+                    int returned = values == null ? 0 : values.length();
+                    children.addView(caption("Dynamic: " + result.optInt("dynamicSymbols")
+                            + " · Static: " + result.optInt("staticSymbols") + " · Showing "
+                            + (returned == 0 ? 0 : offset + 1) + "–" + (offset + returned) + " of " + total));
+                    if (result.has("note")) children.addView(body(result.optString("note")));
+                    if (values != null) for (int i = 0; i < values.length(); i++) {
+                        JSONObject symbol = values.optJSONObject(i);
+                        if (symbol != null) {
+                            SymbolNode node = new SymbolNode(this, symbol);
+                            nodes.add(node);
+                            children.addView(node.root);
+                        }
+                    }
+                    if (returned == 0) children.addView(caption("No matching symbols in this table."));
+                    LinearLayout pages = row();
+                    if (offset > 0) pages.addView(tonal("Previous 100", v -> loadPage(Math.max(0, offset - 100))));
+                    if (!result.isNull("nextOffset")) pages.addView(tonal("Next 100", v -> loadPage(result.optInt("nextOffset"))));
+                    children.addView(pages);
                 });
-            }, "deploy-symbols").start();
-            return;
-        }
-        if (cached.length() == 0) {
-            symbolsHost.addView(caption("No symbols returned for this library."));
-            return;
-        }
-        for (int i = 0; i < cached.length(); i++) {
-            JSONObject symbol = cached.optJSONObject(i);
-            if (symbol == null) continue;
-            String name = symbol.optString("name", "(unnamed)");
-            String value = symbol.optString("value", "");
-            MaterialButton button = tonal("    ↳ " + name + (value.isEmpty() ? "" : "  " + value),
-                    v -> selectSymbol(file, name));
-            button.setGravity(Gravity.START);
-            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            params.leftMargin = dp(16);
-            button.setLayoutParams(params);
-            symbolsHost.addView(button);
-        }
-        if (activeSymbol != null && activeFilePath.equals(file.path)) renderCodeControls();
-    }
-
-    private void selectSymbol(ProjectStore.FileEntry file, String symbol) {
-        activeFilePath = file.path;
-        activeSymbol = symbol;
-        showC = true;
-        renderProjectTab();
-    }
-
-    private void renderCodeControls() {
-        if (codeHost == null) return;
-        codeHost.removeAllViews();
-        codeHost.addView(section("SYMBOL CODE"));
-        codeHost.addView(title(activeSymbol));
-        LinearLayout modes = row();
-        modes.addView(showC ? filled("C code", v -> { showC = true; loadCode(activeFilePath, activeSymbol, true); })
-                : tonal("C code", v -> { showC = true; loadCode(activeFilePath, activeSymbol, true); }));
-        modes.addView(!showC ? filled("ASM code", v -> { showC = false; loadCode(activeFilePath, activeSymbol, false); })
-                : tonal("ASM code", v -> { showC = false; loadCode(activeFilePath, activeSymbol, false); }));
-        codeHost.addView(modes);
-        codeOutput = mono("Loading…");
-        codeHost.addView(codeOutput);
-    }
-
-    private void loadCode(String path, String symbol, boolean c) {
-        if (codeOutput == null) return;
-        final int generation = ++codeGeneration;
-        codeOutput.setText("Loading…");
-        new Thread(() -> {
-            JSONObject args = jsonArgs("name", symbol);
-            try { args.put("max", c ? 4096 : 128); } catch (Throwable ignored) { }
-            JSONObject result = analyze(path, c ? "decompile" : "disasm", args);
-            runOnUiThread(() -> {
-                if (generation != codeGeneration || codeOutput == null) return;
-                codeOutput.setText(c ? result.optString("pseudocode", result.optString("error", result.toString()))
-                        : formatInstructions(result));
             });
-        }, "deploy-code").start();
+        }
+    }
+
+    private final class SymbolNode {
+        final LibraryNode library;
+        final JSONObject symbol;
+        final LinearLayout root = column();
+        final LinearLayout code = column();
+        final MaterialButton toggle;
+        final String label;
+        final boolean function;
+        final int libraryRequest;
+        boolean expanded;
+        int request;
+        int timeoutSeconds = 30;
+        Future<?> job;
+
+        SymbolNode(LibraryNode library, JSONObject symbol) {
+            this.library = library;
+            this.symbol = symbol;
+            libraryRequest = library.request;
+            String name = symbol.optString("name");
+            String type = symbol.optString("type");
+            boolean defined = symbol.optBoolean("defined");
+            function = defined && (type.equals("FUNC") || type.equals("GNU_IFUNC"));
+            label = (name.isEmpty() ? "(unnamed)" : name) + "  " + symbol.optString("value")
+                    + "\n" + symbol.optString("table") + " · " + (defined ? type : "import");
+            toggle = treeButton("▸ " + label, v -> toggle());
+            root.addView(toggle);
+            indent(code, 12);
+            code.setVisibility(View.GONE);
+            root.addView(code);
+        }
+
+        void cancel() {
+            request++;
+            if (job != null) job.cancel(true);
+        }
+
+        void toggle() {
+            expanded = !expanded;
+            cancel();
+            toggle.setText((expanded ? "▾ " : "▸ ") + label);
+            code.setVisibility(expanded ? View.VISIBLE : View.GONE);
+            code.removeAllViews();
+            if (expanded) {
+                if (function) showCode(true, 20000, 0);
+                else {
+                    code.addView(body(symbol.optBoolean("defined") ? "This symbol is data or metadata, not a function."
+                            : "Imported symbol: its implementation is in another library."));
+                    code.addView(mono(symbol.toString()));
+                }
+            }
+        }
+
+        void showCode(boolean c, int budget, long offset) {
+            cancel();
+            final int ticket = ++request;
+            code.removeAllViews();
+            LinearLayout modes = row();
+            modes.addView(c ? filled("C code", v -> showCode(true, budget, 0))
+                    : tonal("C code", v -> showCode(true, budget, 0)));
+            modes.addView(c ? tonal("ASM code", v -> showCode(false, budget, 0))
+                    : filled("ASM code", v -> showCode(false, budget, 0)));
+            code.addView(modes);
+            TextView output = mono(c ? "Analyzing… (up to " + timeoutSeconds + " seconds)" : "Loading…");
+            code.addView(output);
+            long start;
+            try { start = Long.parseUnsignedLong(symbol.optString("value").substring(2), 16); }
+            catch (Exception e) { output.setText("Invalid symbol address"); return; }
+            long size = symbol.optLong("size");
+            JSONObject args = jsonArgs("address", "0x" + Long.toUnsignedString(start + offset, 16));
+            try {
+                args.put("max", c ? budget : 512);
+                if (c) args.put("timeoutSeconds", timeoutSeconds);
+                if (!c) {
+                    args.put("bytes", size > 0 ? (int)Math.min(4096, size - offset) : 4096);
+                }
+            } catch (Exception ignored) { }
+            job = analysisWorkers.submit(() -> {
+                JSONObject result = analyze(library.file.path, c ? "decompile" : "disasm", args);
+                runOnUiThread(() -> {
+                    if (library.generation != viewGeneration || libraryRequest != library.request
+                            || !library.expanded || !expanded || ticket != request) return;
+                    output.setText(c ? result.optString("pseudocode", result.optString("error", result.toString()))
+                            : formatInstructions(result));
+                    if (c) {
+                        String warnings = result.optString("warnings");
+                        if (!warnings.isEmpty()) code.addView(body(warnings));
+                        code.addView(caption("C pseudocode uses inferred types and control flow."));
+                        if ("DECOMPILER_TIMEOUT".equals(result.optString("code")) && timeoutSeconds < 120)
+                            code.addView(tonal("Retry with 120 seconds", v -> {
+                                timeoutSeconds = 120;
+                                showCode(true, budget, 0);
+                            }));
+                        if ("DECOMPILE_INSTRUCTION_LIMIT".equals(result.optString("code"))) {
+                            code.addView(body("Instruction limit: " + budget + ". ASM remains available."));
+                            if (budget < 100000) code.addView(tonal("Retry with 100,000 instructions",
+                                    v -> showCode(true, 100000, 0)));
+                        }
+                    } else if (!result.has("error")) {
+                        long consumed = result.optLong("decodedBytes");
+                        long next = offset + consumed;
+                        code.addView(caption("Bytes " + offset + "–" + next
+                                + (size > 0 ? " / " + size : " · function size unknown")
+                                + " · " + result.optString("stopReason")));
+                        LinearLayout pages = row();
+                        if (offset > 0) pages.addView(tonal("From start", v -> showCode(false, budget, 0)));
+                        if (consumed > 0 && (size == 0 || next < size)
+                                && !"undecodable_bytes".equals(result.optString("stopReason")))
+                            pages.addView(tonal("Next ASM page", v -> showCode(false, budget, next)));
+                        code.addView(pages, 1);
+                    }
+                });
+            });
+        }
+    }
+
+    private void invalidateAnalysis() {
+        viewGeneration++;
+        for (LibraryNode library : libraries) library.cancelCode();
+        libraries.clear();
+    }
+
+    private LinearLayout column() {
+        LinearLayout column = new LinearLayout(this);
+        column.setOrientation(LinearLayout.VERTICAL);
+        column.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        return column;
+    }
+
+    private void indent(View view, int margin) {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        params.leftMargin = dp(margin);
+        view.setLayoutParams(params);
+    }
+
+    private MaterialButton treeButton(String label, View.OnClickListener listener) {
+        MaterialButton button = tonal(label, listener);
+        button.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
+        button.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        return button;
+    }
+
+    @Override protected void onDestroy() {
+        invalidateAnalysis();
+        analysisWorkers.shutdownNow();
+        ui.removeCallbacksAndMessages(null);
+        super.onDestroy();
     }
 
     // ---- assembler --------------------------------------------------------
@@ -511,7 +673,6 @@ public final class DeployActivity extends AppCompatActivity {
                 LinearLayout actions = row();
                 actions.addView(filled("Analyze", v -> {
                     activeFilePath = file.path;
-                    activeSymbol = null;
                     projectTabs.getTabAt(0).select();
                 }));
                 actions.addView(outlined("Remove", v -> confirmRemove(file)));
@@ -531,7 +692,6 @@ public final class DeployActivity extends AppCompatActivity {
                     projects.removeFile(currentProject, file);
                     currentProject = projects.byId(currentProject.id);
                     activeFilePath = currentProject.firstFile() == null ? null : currentProject.firstFile().path;
-                    activeSymbol = null;
                     renderProjectTab();
                 }).show();
     }
@@ -539,6 +699,7 @@ public final class DeployActivity extends AppCompatActivity {
     // ---- MCP settings -----------------------------------------------------
 
     private void renderSettings() {
+        invalidateAnalysis();
         toolbar.setTitle("Deploy settings");
         toolbar.setNavigationIcon(android.R.drawable.ic_menu_revert);
         toolbar.setNavigationContentDescription("Back to projects");

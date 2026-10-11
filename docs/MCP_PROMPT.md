@@ -21,8 +21,8 @@ Deploy 0.4.0 使用 LIEF 解析、Capstone 反汇编、Ghidra 生成伪代码及
   调用时明确选择服务器：Deploy 为直接分析，PosEdMCP 为 AIDL 代理。
   两者使用各自 token；AIDL 绑定不需要把其中一个 token 传给另一个服务器。
 - RikkaHub 使用 Streamable HTTP，URL 如上，请求头名称为 `Authorization`，
-  值为 `Bearer <Deploy 看板中的 token>`。不要把 PosEdMCP 的 token 填到 Deploy。
-  Deploy 重启后需在看板点击 `Start MCP service`；仅打开看板或存在 AIDL 进程不证明 HTTP 已启动。
+  值为 `Bearer <Deploy Settings 页中的 token>`。不要把 PosEdMCP 的 token 填到 Deploy。
+  Deploy 重启后需在 Settings 页点击 `Start service`；仅打开页面或存在 AIDL 进程不证明 HTTP 已启动。
 - ColorOS 下切到客户端后连接超时，还应检查 ROM 冻结。PosEdMCP 特殊设置中的
   “帮助Deploy”同时阻止 Athena 清理和 Hans 对 Deploy 的后台冻结判定；默认关闭，需由用户开启。
   已在一加 PLR110 / Android 16 验证 Hans 拦截，但不代表所有 ROM 版本均兼容，也不提供开机自启。
@@ -52,7 +52,7 @@ Deploy 不共享 PosEdMCP 的 UID 或特权。经过 PosEdMCP 的 AIDL 代理也
 | op | 当前输出与用途 |
 | --- | --- |
 | `overview` | ELF 是否可解析、位宽、大小端、架构、类型、入口及节/段数量 |
-| `symbols` | 动态符号表：名称、值、大小、类型、绑定、可见性和定义状态；不枚举完整 `.symtab` |
+| `symbols` | 动态和静态符号表：名称、值、大小、类型、绑定、可见性、定义状态与 `(table,index)` 标识；支持分页和名称过滤 |
 | `relocations` | 重定位地址、类型、addend 及关联符号等；只描述文件，不修改 GOT/PLT |
 | `strings` | `SHT_STRTAB` 字符串表中长度至少 4 字节的条目；不扫描全文件字符串 |
 | `metadata` | ELF 头、解释器、`DT_NEEDED`、节与段；目前不输出完整 build-id/notes 或安全加固评级 |
@@ -60,9 +60,25 @@ Deploy 不共享 PosEdMCP 的 UID 或特权。经过 PosEdMCP 的 AIDL 代理也
 | `disasm` | 按函数符号或 ELF 虚拟地址输出 Capstone 指令，详见下文 |
 | `decompile` | Ghidra 11.3.2 原生引擎生成 C 风格伪代码，当前仅支持小端 AArch64 ELF |
 
-列表操作可用 `max` 限制结果。关注返回的 `truncated`、`limit`；当前没有 `offset`、
-游标或名称过滤参数。已知名称时直接 `resolve`，不要把截断后的列表当作完整符号清单。
+列表操作可用 `max` 限制结果。`symbols` 支持 `offset` / `query` / `table`，按返回的
+`nextOffset` 读取后续页；其余列表仍只返回受 `max` 限制的结果，没有分页和名称过滤。
+已知名称时直接 `resolve`，不要把截断后的列表当作完整符号清单。
 `found:false` 表示没找到；`defined:false` 表示导入符号，不能把它的 `value` 当作本库函数入口。
+
+# 符号分页与项目树
+
+`symbols` 默认 `table=all` 同时枚举 `.dynsym` 和 `.symtab`，也可选 `dynamic` / `static`。
+`query` 是区分大小写的名称子串；`offset` 从 0 开始，在过滤后分页。`max` 默认 2000，
+范围 1–20000；响应同时受 Binder 传输大小约束，因此应始终跟随 `nextOffset`，直到其为 null。
+`count` 是过滤后的总数，`returned` 是本页数量；`dynamicSymbols` / `staticSymbols` 是原始表计数。
+同名或相同地址的条目仍保留，以 `(table,index)` 区分。`defined=false` 是外部导入，
+函数实现不在此文件；没有 `.symtab` 时不能凭空恢复被剥除的内部函数名。
+
+项目 UI 每页显示 100 条，支持表选择和名称过滤。库、符号都可以点击展开/收起；
+代码直接位于对应符号的子节点，C/ASM 按钮位于同一节点内。ASM 有后续页和已读取字节计数。
+指令预算不足返回 `DECOMPILE_INSTRUCTION_LIMIT`，含 `instructionLimit` 和 `complete:false`；
+可提高 `max` 或查看 ASM。超时仍返回 `DECOMPILER_TIMEOUT`，UI 提供 120 秒重试，
+不能把这些错误当成完整的反编译结果。Ghidra 即使在调试包中也使用编译优化。
 
 # 推荐分析顺序
 
@@ -114,7 +130,7 @@ Deploy 不共享 PosEdMCP 的 UID 或特权。经过 PosEdMCP 的 AIDL 代理也
 
 `deploy_analyze(op="decompile")` 同样在 `name` 和 ELF `address` 中恰选一个，
 要求入口位于有文件内容的可执行段，且按 4 字节对齐。`max` 此时是 Ghidra 的
-指令预算，默认 4096，范围 1–20000；不是输出行数。示例：
+指令预算，默认 20000，范围 1–100000；不是输出行数。示例：
 
 ```json
 {"path":"/sdcard/deploy-tests/libdeploy_fixture.so","op":"decompile","name":"deploy_fixture_calculate"}
@@ -123,7 +139,7 @@ Deploy 不共享 PosEdMCP 的 UID 或特权。经过 PosEdMCP 的 AIDL 代理也
 读取 `pseudocode`、`warnings` 和 `note`。类型及函数原型由引擎推断，未知类型可能
 保留占位名；这不是原始源码。当前没有完整的导入原型、重定位及跨库语义恢复。
 不支持的架构返回 `DECOMPILE_ARCH_UNSUPPORTED`。反编译在私有 `:decompiler` 进程中
-串行运行，单次工作上限 30 秒，超时返回 `DECOMPILER_TIMEOUT` 并停止该工作进程；
+串行运行，默认工作上限 30 秒，可用 `timeoutSeconds` 指定 1–120 秒，超时返回 `DECOMPILER_TIMEOUT` 并停止该工作进程；
 输入文件分析失败、预算不足等返回错误，MCP 服务仍可用。输出上限 256 KiB。
 这一进程隔离目前只覆盖伪代码操作，其他原生引擎仍在服务进程内运行。
 

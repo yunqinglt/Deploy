@@ -12,6 +12,18 @@ import org.json.JSONObject;
 
 final class DecompilerClient {
     static synchronized JSONObject analyze(String path, JSONObject args) throws org.json.JSONException {
+        if (Thread.currentThread().isInterrupted())
+            return new JSONObject().put("error", "analysis cancelled").put("code", "DECOMPILE_CANCELLED");
+        Object rawTimeout = args.opt("timeoutSeconds");
+        int timeoutSeconds = 30;
+        if (rawTimeout != null) {
+            if (!(rawTimeout instanceof Integer) && !(rawTimeout instanceof Long))
+                throw new IllegalArgumentException("timeoutSeconds must be an integer between 1 and 120");
+            long seconds = ((Number)rawTimeout).longValue();
+            if (seconds < 1 || seconds > 120)
+                throw new IllegalArgumentException("timeoutSeconds must be between 1 and 120");
+            timeoutSeconds = (int)seconds;
+        }
         Context context = dev.deploy.DeployApplication.context();
         CountDownLatch connected = new CountDownLatch(1);
         AtomicReference<IDecompiler> worker = new AtomicReference<>();
@@ -26,7 +38,7 @@ final class DecompilerClient {
         boolean bound = false;
         int pid = 0;
         IDecompiler target = null;
-        boolean timedOut = false;
+        boolean stopWorker = false;
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
             bound = context.bindService(new Intent(context,DecompilerService.class),connection,Context.BIND_AUTO_CREATE);
@@ -36,17 +48,17 @@ final class DecompilerClient {
             IDecompiler service = target;
             String json=args.toString();
             Future<String> result=executor.submit(() -> service.decompile(path,json));
-            return new JSONObject(result.get(30,TimeUnit.SECONDS));
+            return new JSONObject(result.get(timeoutSeconds,TimeUnit.SECONDS));
         } catch (Exception e) {
-            timedOut = e instanceof TimeoutException;
+            stopWorker = e instanceof TimeoutException || e instanceof InterruptedException;
             if (e instanceof InterruptedException) Thread.currentThread().interrupt();
             return new JSONObject().put("error", e instanceof TimeoutException
-                    ? "decompiler exceeded 30 seconds; worker stopped" : "decompiler worker failed: " + e)
+                    ? "decompiler exceeded " + timeoutSeconds + " seconds; worker stopped" : "decompiler worker failed: " + e)
                     .put("code", e instanceof TimeoutException ? "DECOMPILER_TIMEOUT" : "DECOMPILE_FAILED");
         } finally {
             // Reuse the cached process after normal work. Killing a healthy bound
             // service races the next bind and triggers Android's restart backoff.
-            if (timedOut && pid>0 && pid!=Process.myPid() && target!=null
+            if (stopWorker && pid>0 && pid!=Process.myPid() && target!=null
                     && target.asBinder().isBinderAlive()) Process.killProcess(pid);
             executor.shutdownNow();
             if (bound) context.unbindService(connection);

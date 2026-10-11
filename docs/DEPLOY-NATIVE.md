@@ -37,10 +37,10 @@ An IFUNC symbol describes its resolver, not the implementation selected at runti
   error. No instruction is fabricated when decoding stops.
 - `op=decompile` uses native Ghidra 11.3.2, currently little-endian AArch64 only.
   Select exactly one symbol name or ELF address. `max` is the instruction budget,
-  default 4096, range 1–20000. Output includes inferred C `pseudocode`, `warnings`
+  default 20000, range 1–100000. Output includes inferred C `pseudocode`, `warnings`
   and `note`; types/prototypes are inferred, not original source. Import prototype
   and relocation recovery are incomplete. Output is capped at 256 KiB.
-  It runs in the unexported `:decompiler` service with a 30-second work deadline;
+  It runs in the unexported `:decompiler` service with a default 30-second work deadline (timeoutSeconds accepts 1–120);
   timeout kills that worker. Healthy workers may be reused between requests.
   Errors preserve the MCP frontend. Other engines still run in the service process.
 
@@ -209,3 +209,15 @@ paths; manual force-stop remains available. Defaults remain off. New independent
 hook ownership requires the updated system_server module (normally after reboot).
 Synthetic Lua/registry tests are in PosEdMCP `tests/run-hooks.ps1`; they do not prove
 all ROM method signatures or versions. See MILESTONE-0.4.md for verified scope.
+
+
+Symbol enumeration now covers both dynamic and static tables (default `table=all`).
+Use `table`, `query`, `offset`, and `max`, following `nextOffset` until null;
+responses also have a transport size cap. `(table,index)` identifies duplicates
+without discarding aliases or local symbols. No static table means stripped
+local names are unavailable. Undefined imports have no code in this ELF.
+Instruction exhaustion has code `DECOMPILE_INSTRUCTION_LIMIT`; the UI offers
+larger-budget retries and paged ASM. Ghidra uses `-O2` in debug builds as well.
+`tools/deploy-analysis-regression.py` generates an ELF containing a 5001-instruction
+function and 620 local functions, then verifies paging, validation, C and ASM
+through a running Deploy MCP server. Requires `--serial`, `--adb`, `--clang`.
