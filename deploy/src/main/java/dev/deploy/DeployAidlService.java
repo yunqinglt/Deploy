@@ -40,6 +40,27 @@ public final class DeployAidlService extends Service {
             return wrap(() -> core.analyze(path, op, parse(argsJson)));
         }
 
+        @Override public String assemble(String arch, String source, String address) {
+            return wrap(() -> core.assemble(arch, source, address));
+        }
+
+        @Override public String analyzeBuffer(ParcelFileDescriptor data, String arch, String address, String argsJson) {
+            return wrap(() -> {
+                if (data == null) throw new IllegalArgumentException("snapshot descriptor is required");
+                try (ParcelFileDescriptor.AutoCloseInputStream in = new ParcelFileDescriptor.AutoCloseInputStream(data);
+                        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream()) {
+                    if (data.getStatSize() < 1 || data.getStatSize() > 4096)
+                        throw new IllegalArgumentException("snapshot must be a regular 1..4096-byte file, not a pipe");
+                    byte[] buffer = new byte[1024]; int n;
+                    while ((n = in.read(buffer)) != -1) {
+                        if (out.size() + n > 4096) throw new IllegalArgumentException("snapshot exceeds 4096 bytes");
+                        out.write(buffer, 0, n);
+                    }
+                    return core.disassembleBytes(out.toByteArray(), arch, address, parse(argsJson));
+                }
+            });
+        }
+
         @Override
         public ParcelFileDescriptor prepareLibrary(String path, Bundle metadata) {
             try {

@@ -67,107 +67,130 @@ def record(name, value, valid):
 
 
 fixture = '/sdcard/deploy-tests/libdeploy_fixture.so'
-tools = deploy.rpc('tools/list', {})['result']['tools']
-record('deploy_tools', tools, {t['name'] for t in tools} == {'deploy_status', 'deploy_analyze'})
-properties = next(t for t in tools if t['name'] == 'deploy_analyze')['inputSchema']['properties']
-record('schema', properties, {'name', 'address', 'max', 'bytes', 'mode'} <= properties.keys())
-for endpoint, client in [('direct', deploy), ('aidl', posed)]:
-    status = client.call('deploy_status')
-    record(endpoint + '_status', status, 'disasm' in status.get('ops', []))
-    resolved = client.call('deploy_analyze', path=fixture, op='resolve', name='deploy_fixture_answer')
-    record(endpoint + '_resolve', resolved, resolved.get('found') is True)
-    asm = client.call('deploy_analyze', path=fixture, op='disasm', name='deploy_fixture_answer', max=16)
-    instructions = asm.get('instructions', [])
-    record(endpoint + '_disasm', asm, any(i['mnemonic'] == 'ret' for i in instructions)
-           and any('#0x2a' in i['operands'] or '#42' in i['operands'] for i in instructions))
-    addressed = client.call('deploy_analyze', path=fixture, op='disasm', address=resolved['value'], bytes=8, max=2)
-    record(endpoint + '_address', addressed, addressed.get('instructions') == instructions[:2])
-    limited = client.call('deploy_analyze', path=fixture, op='disasm', name='deploy_fixture_answer', max=1)
-    record(endpoint + '_limit', limited, limited.get('count') == 1 and limited.get('stopReason') == 'instruction_limit')
-    libc = client.call('deploy_analyze', path='/sdcard/libc.so', op='disasm', name='strlen', max=8)
-    record(endpoint + '_libc', libc, libc.get('count', 0) > 0)
-    for label, arguments in [
-        ('missing_symbol', dict(op='disasm', name='symbol_that_does_not_exist')),
-        ('unmapped_address', dict(op='disasm', address='0xfffffffffffffff0')),
-        ('misaligned', dict(op='disasm', address=hex(int(resolved['value'], 16) + 1))),
-        ('ambiguous', dict(op='disasm', address=resolved['value'], name='deploy_fixture_answer')),
-        ('bad_limit', dict(op='disasm', name='deploy_fixture_answer', max=513)),
-        ('negative_limit', dict(op='disasm', name='deploy_fixture_answer', max=-1)),
-        ('no_decompiler', dict(op='decompile')),
-    ]:
-        response = client.call('deploy_analyze', path=fixture, **arguments)
-        record(endpoint + '_' + label, response, 'error' in response)
+if __name__ == '__main__':
+    tools = deploy.rpc('tools/list', {})['result']['tools']
+    record('deploy_tools', tools, {t['name'] for t in tools} == {'deploy_status', 'deploy_analyze', 'deploy_assemble', 'deploy_analyze_bytes'})
+    properties = next(t for t in tools if t['name'] == 'deploy_analyze')['inputSchema']['properties']
+    record('schema', properties, {'name', 'address', 'max', 'bytes', 'mode'} <= properties.keys())
+    for endpoint, client in [('direct', deploy), ('aidl', posed)]:
+        status = client.call('deploy_status')
+        record(endpoint + '_status', status, 'disasm' in status.get('ops', []))
+        resolved = client.call('deploy_analyze', path=fixture, op='resolve', name='deploy_fixture_answer')
+        record(endpoint + '_resolve', resolved, resolved.get('found') is True)
+        asm = client.call('deploy_analyze', path=fixture, op='disasm', name='deploy_fixture_answer', max=16)
+        instructions = asm.get('instructions', [])
+        record(endpoint + '_disasm', asm, any(i['mnemonic'] == 'ret' for i in instructions)
+               and any('#0x2a' in i['operands'] or '#42' in i['operands'] for i in instructions))
+        addressed = client.call('deploy_analyze', path=fixture, op='disasm', address=resolved['value'], bytes=8, max=2)
+        record(endpoint + '_address', addressed, addressed.get('instructions') == instructions[:2])
+        limited = client.call('deploy_analyze', path=fixture, op='disasm', name='deploy_fixture_answer', max=1)
+        record(endpoint + '_limit', limited, limited.get('count') == 1 and limited.get('stopReason') == 'instruction_limit')
+        libc = client.call('deploy_analyze', path='/sdcard/libc.so', op='disasm', name='strlen', max=8)
+        record(endpoint + '_libc', libc, libc.get('count', 0) > 0)
+        for label, arguments in [
+            ('missing_symbol', dict(op='disasm', name='symbol_that_does_not_exist')),
+            ('unmapped_address', dict(op='disasm', address='0xfffffffffffffff0')),
+            ('misaligned', dict(op='disasm', address=hex(int(resolved['value'], 16) + 1))),
+            ('ambiguous', dict(op='disasm', address=resolved['value'], name='deploy_fixture_answer')),
+            ('bad_limit', dict(op='disasm', name='deploy_fixture_answer', max=513)),
+            ('negative_limit', dict(op='disasm', name='deploy_fixture_answer', max=-1)),
+            ('missing_decompile_selector', dict(op='decompile')),
+        ]:
+            response = client.call('deploy_analyze', path=fixture, **arguments)
+            record(endpoint + '_' + label, response, 'error' in response)
 
-if options.load_fixture:
-    status = posed.call('module_status')
-    peers = [p for p in status.get('bridgePeers', []) if p.startswith('app:dev.deploy.fixture:')]
-    record('fixture_peer', peers, len(peers) == 1)
-    peer = peers[0]
-    result = posed.call('deploy_load_native', package='dev.deploy.fixture', peer=peer, path=fixture,
-        entry='deploy_fixture_probe', reason='Load our test library: constructor captures its process PID; entry returns that PID. No hooks or file changes.')
-    record('runtime_load', result, result.get('loaded') is True
-        and result.get('entryResult') == peer.rsplit(':', 1)[1]
-        and result.get('pid') == int(peer.rsplit(':', 1)[1]) and result.get('uid', 0) != 0)
-    again = posed.call('deploy_load_native', package='dev.deploy.fixture', peer=peer, path=fixture,
-        entry='deploy_fixture_answer', reason='Reuse the same test library and call its int64_t(void) function returning 42.')
-    record('runtime_reuse', again, again.get('alreadyLoaded') is True and again.get('entryResult') == '42'
-        and again.get('handleId') == result.get('handleId'))
-    missing = posed.call('deploy_load_native', package='dev.deploy.fixture', peer=peer, path=fixture,
-        entry='deploy_fixture_absent', reason='Verify a missing entry is reported explicitly after the test library has been loaded; no function will be invoked.')
-    record('runtime_missing_entry', missing, 'error' in missing and missing.get('loaded') is True)
-    offline = posed.call('deploy_load_native', package='dev.deploy.fixture', peer='app:dev.deploy.fixture:0',
-        path=fixture, reason='Verify an offline target is rejected before any code is loaded.')
-    record('runtime_offline', offline, 'error' in offline)
+    if options.load_fixture:
+        status = posed.call('module_status')
+        peers = [p for p in status.get('bridgePeers', []) if p.startswith('app:dev.deploy.fixture:')]
+        record('fixture_peer', peers, len(peers) == 1)
+        peer = peers[0]
+        result = posed.call('deploy_load_native', package='dev.deploy.fixture', peer=peer, path=fixture,
+            entry='deploy_fixture_probe', reason='Load our test library: constructor captures its process PID; entry returns that PID. No hooks or file changes.')
+        record('runtime_load', result, result.get('loaded') is True
+            and result.get('entryResult') == peer.rsplit(':', 1)[1]
+            and result.get('pid') == int(peer.rsplit(':', 1)[1]) and result.get('uid', 0) != 0)
+        again = posed.call('deploy_load_native', package='dev.deploy.fixture', peer=peer, path=fixture,
+            entry='deploy_fixture_answer', reason='Reuse the same test library and call its int64_t(void) function returning 42.')
+        record('runtime_reuse', again, again.get('alreadyLoaded') is True and again.get('entryResult') == '42'
+            and again.get('handleId') == result.get('handleId'))
+        missing = posed.call('deploy_load_native', package='dev.deploy.fixture', peer=peer, path=fixture,
+            entry='deploy_fixture_absent', reason='Verify a missing entry is reported explicitly after the test library has been loaded; no function will be invoked.')
+        record('runtime_missing_entry', missing, 'error' in missing and missing.get('loaded') is True)
+        offline = posed.call('deploy_load_native', package='dev.deploy.fixture', peer='app:dev.deploy.fixture:0',
+            path=fixture, reason='Verify an offline target is rejected before any code is loaded.')
+        record('runtime_offline', offline, 'error' in offline)
 
-if options.isolation:
-    def available(port):
+    if options.isolation:
+        def available(port):
+            try:
+                with urllib.request.urlopen(f'http://127.0.0.1:{port}/health', timeout=3) as response:
+                    return json.load(response).get('status') == 'ok'
+            except Exception:
+                return False
+
+        original = {}
+        for package in ['dev.deploy', 'dev.posedmcp']:
+            dump = adb('shell', 'dumpsys', 'package', package).decode()
+            state = re.search(r'User 0:.*?enabled=(\d+)', dump).group(1)
+            assert state in ['0', '1'], f'{package} must initially be enabled'
+            original[package] = 'default-state' if state == '0' else 'enable'
+
+        def restore(package):
+            adb('shell', 'pm', original[package], '--user', '0', package)
+
+        def start(package):
+            # Start through the public activity. Android 16 correctly rejects adb
+            # attempts to launch either app's unexported service directly.
+            activity = '.DeployActivity' if package == 'dev.deploy' else '.MainActivity'
+            adb('shell', 'am', 'start', '--user', '0', '-n', package + '/' + activity)
+            port = 14177 if package == 'dev.deploy' else 18765
+            if package == 'dev.deploy' and not available(port):
+                adb('shell', 'uiautomator', 'dump', '/data/local/tmp/deploy-smoke-ui.xml')
+                ui = ET.fromstring(adb('shell', 'cat', '/data/local/tmp/deploy-smoke-ui.xml'))
+                buttons = [n for n in ui.iter('node')
+                    if n.get('text', '').casefold() == 'start mcp service']
+                running = any(n.get('text', '').casefold() == 'stop mcp service' for n in ui.iter('node'))
+                assert len(buttons) == 1 or running, 'Deploy service button not visible; unlock the dashboard'
+                if buttons and not available(port):
+                    x1, y1, x2, y2 = map(int, re.findall(r'\d+', buttons[0].get('bounds', '')))
+                    adb('shell', 'input', 'tap', str((x1+x2)//2), str((y1+y2)//2))
+            deadline = time.monotonic() + 20
+            while not available(port) and time.monotonic() < deadline:
+                time.sleep(0.5)
+            assert available(port), f'{package} MCP did not restart'
+
         try:
-            with urllib.request.urlopen(f'http://127.0.0.1:{port}/health', timeout=3) as response:
-                return json.load(response).get('status') == 'ok'
-        except Exception:
-            return False
-
-    original = {}
-    for package in ['dev.deploy', 'dev.posedmcp']:
-        dump = adb('shell', 'dumpsys', 'package', package).decode()
-        state = re.search(r'User 0:.*?enabled=(\d+)', dump).group(1)
-        assert state in ['0', '1'], f'{package} must initially be enabled'
-        original[package] = 'default-state' if state == '0' else 'enable'
-
-    def restore(package):
-        adb('shell', 'pm', original[package], '--user', '0', package)
-
-    def start(package, service):
-        # Launch clears the stopped-package state after disable/enable on this ROM;
-        # starting an unexported service directly can otherwise report "not found".
-        activity = '.DeployActivity' if package == 'dev.deploy' else '.MainActivity'
-        adb('shell', 'am', 'start', '--user', '0', '-n', package + '/' + activity)
-        adb('shell', 'am', 'start-foreground-service', '--user', '0', '-n', package + '/' + service)
-
-    try:
-        adb('shell', 'pm', 'disable-user', '--user', '0', 'dev.deploy')
+            adb('shell', 'pm', 'disable-user', '--user', '0', 'dev.deploy')
+            time.sleep(1)
+            missing = posed.call('deploy_status')
+            record('isolated_posed_missing_deploy', missing, 'error' in missing)
+            names = [t['name'] for t in posed.rpc('tools/list', {})['result']['tools']]
+            record('isolated_posed_tools', names, 'root_shell_exec' in names and available(18765))
+            device = posed.call('device_info')
+            record('isolated_posed_device_info', {'ok': 'error' not in device}, 'error' not in device)
+            record('isolated_deploy_endpoint_off', {'available': available(14177)}, not available(14177))
+            restore('dev.deploy')
+            start('dev.deploy')
+            adb('shell', 'pm', 'disable-user', '--user', '0', 'dev.posedmcp')
+            time.sleep(1)
+            record('isolated_posed_endpoint_off', {'available': available(18765)}, not available(18765))
+            names = [t['name'] for t in deploy.rpc('tools/list', {})['result']['tools']]
+            record('isolated_deploy_tools', names, set(names) == {'deploy_status', 'deploy_analyze', 'deploy_assemble', 'deploy_analyze_bytes'})
+            value = deploy.call('deploy_analyze', path=fixture, op='disasm', name='deploy_fixture_answer')
+            record('isolated_deploy_disasm', value, value.get('count', 0) > 0)
+            value = deploy.call('deploy_analyze', path=fixture, op='decompile', name='deploy_fixture_answer')
+            record('isolated_deploy_decompile', value, 'return' in value.get('pseudocode', ''))
+            code = deploy.call('deploy_assemble', arch='aarch64', source='mov x0,#42; ret')
+            record('isolated_deploy_assemble', code, code.get('size') == 8)
+            value = deploy.call('deploy_analyze_bytes', arch='aarch64', bytes=code['bytes'])
+            record('isolated_deploy_bytes', value, value.get('count') == 2)
+        finally:
+            restore('dev.deploy')
+            restore('dev.posedmcp')
+            try:
+                start('dev.deploy')
+            finally:
+                start('dev.posedmcp')
         time.sleep(1)
-        missing = posed.call('deploy_status')
-        record('isolated_posed_missing_deploy', missing, 'error' in missing)
-        names = [t['name'] for t in posed.rpc('tools/list', {})['result']['tools']]
-        record('isolated_posed_tools', names, 'root_shell_exec' in names and available(18765))
-        device = posed.call('device_info')
-        record('isolated_posed_device_info', {'ok': 'error' not in device}, 'error' not in device)
-        record('isolated_deploy_endpoint_off', {'available': available(14177)}, not available(14177))
-        restore('dev.deploy')
-        start('dev.deploy', '.DeployMcpService')
-        adb('shell', 'pm', 'disable-user', '--user', '0', 'dev.posedmcp')
-        time.sleep(1)
-        record('isolated_posed_endpoint_off', {'available': available(18765)}, not available(18765))
-        names = [t['name'] for t in deploy.rpc('tools/list', {})['result']['tools']]
-        record('isolated_deploy_tools', names, set(names) == {'deploy_status', 'deploy_analyze'})
-        value = deploy.call('deploy_analyze', path=fixture, op='disasm', name='deploy_fixture_answer')
-        record('isolated_deploy_disasm', value, value.get('count', 0) > 0)
-    finally:
-        restore('dev.deploy')
-        restore('dev.posedmcp')
-        start('dev.deploy', '.DeployMcpService')
-        start('dev.posedmcp', '.McpService')
-    time.sleep(1)
-    status = posed.call('deploy_status')
-    record('restored_aidl', status, status.get('version') == '0.3.0' and available(18765) and available(14177))
+        status = posed.call('deploy_status')
+        record('restored_aidl', status, status.get('apiVersion') == 2 and available(18765) and available(14177))

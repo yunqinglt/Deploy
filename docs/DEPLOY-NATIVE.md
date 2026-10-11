@@ -1,6 +1,6 @@
 # Deploy analysis and native loading
 
-Deploy 0.3.0 runs LIEF + Capstone on the device. The standalone MCP endpoint
+Deploy 0.4.0 runs LIEF, Capstone, Ghidra and Keystone on the device. The standalone MCP endpoint
 (`127.0.0.1:4177`), PosEdMCP's AIDL proxy, and the future frontend share the same
 analysis core. The applications have separate UIDs and preferences; no shared UID
 or root capability is added to Deploy.
@@ -35,12 +35,57 @@ An IFUNC symbol describes its resolver, not the implementation selected at runti
   use `mode=thumb` for a raw even Thumb address or `mode=arm` for ARM instructions.
 - Unmapped, misaligned, undefined or non-function addresses/symbols produce an
   error. No instruction is fabricated when decoding stops.
-- `op=decompile` is reserved for a future C pseudocode engine. It returns
-  `DECOMPILER_UNAVAILABLE`; it does not label assembly as pseudocode.
+- `op=decompile` uses native Ghidra 11.3.2, currently little-endian AArch64 only.
+  Select exactly one symbol name or ELF address. `max` is the instruction budget,
+  default 4096, range 1–20000. Output includes inferred C `pseudocode`, `warnings`
+  and `note`; types/prototypes are inferred, not original source. Import prototype
+  and relocation recovery are incomplete. Output is capped at 256 KiB.
+  It runs in the unexported `:decompiler` service with a 30-second work deadline;
+  timeout kills that worker. Healthy workers may be reused between requests.
+  Errors preserve the MCP frontend. Other engines still run in the service process.
 
 The shared `DeployContract` keeps both MCP input schemas aligned, including
 `name`, `address`, `max`, `bytes`, and `mode`. These arguments are also available
 through AIDL. Native errors set the MCP tool error flag.
+
+## Assembly, buffers and live memory
+
+Both servers expose `deploy_assemble(arch, source, address="0x0")` and
+`deploy_analyze_bytes(arch, bytes, address="0x0", max=64)`. `arch` is one of
+`aarch64`, `arm`, `thumb`, `x86`, `x86_64`, all little-endian; x86 uses Intel syntax.
+Assembly accepts at most 16384 characters/512 statements and produces 1–4096
+bytes, with `executed:false`. Only instructions and simple named labels are
+accepted; directives, quoted strings, block comments and escapes are rejected.
+Byte input is 1–4096 bytes of contiguous hex pairs. Decode max is 1–512.
+ARM64/ARM origins must be 4-byte aligned, Thumb 2-byte aligned; 32-bit targets
+require a 32-bit address range. Supply the final origin for PC-relative encoding.
+
+Only PosEdMCP exposes these two additional runtime tools, using its existing
+plugin confirmation policy and an exact ordinary scoped app peer:
+
+- `deploy_disasm_memory(package, peer, address, reason, length=256, max=64)` reads
+  1–4096 bytes within one readable mapping through `/proc/self/mem` in the target.
+  PosEdMCP writes a private, unlinked read-only descriptor and sends it through
+  AIDL `analyzeBuffer`. Deploy never opens the other process. Results include
+  snapshot PID/UID/time and `addressKind:runtime_virtual_address`.
+- `deploy_patch_memory(package, peer, address, source, expected, reason)` assembles
+  exactly one aligned 4-byte ARM64 instruction at the final runtime address.
+  Expected bytes must be 8 hex digits. The target requires a private readable
+  executable mapping, temporarily adds write permission, atomically compares and
+  replaces the instruction, flushes the instruction cache, and restores protection.
+  Inspect both `patched` and `permissionsRestored`, including on error.
+
+These addresses include ASLR; they are not ELF virtual addresses or file offsets.
+Threads are not stopped and mappings are not pinned against concurrent unloading.
+The caller must arrange a suitable target lifetime and code usage window. There
+is no multi-instruction patch, trampoline, root fallback or automatic rollback.
+To restore, assemble the original instruction and use the replacement bytes as
+`expected`. A timeout/disconnect/protection-restore error can follow a write;
+inspect state before retrying. Returned `originalBytes`/`replacementBytes` aid recovery.
+
+AIDL v2 appends `assemble` and `analyzeBuffer` without renumbering existing
+methods. Status advertises `apiVersion:2`. The receiver closes the buffer FD and
+rejects pipes/oversized input. See the shared contract synchronization guide.
 
 ## Runtime loading through PosEdMCP
 
@@ -141,3 +186,26 @@ but the supplementary device test timed out and its retry was rejected by the
 execution approval system ("blocked by policy", including after user approval).
 Those four targets remain unverified on the device. An occasional background
 HTTP timeout was observed; it was not diagnosed as a parser or loader failure.
+
+
+For 0.4.0 engines and reversible memory operations:
+
+```text
+python tools/deploy-engines-smoke.py --output smoke-engines.json
+python tools/deploy-engines-smoke.py --runtime-only --output smoke-runtime.json
+```
+
+The second command requires the scoped fixture and the user's phone confirmations.
+Keep the fixture foreground to avoid ROM background freezing during a bridge call.
+Do not change confirmation preferences to run the suite. The script restores a
+successful patch in `finally`; if a write's result is lost, inspect/restart the
+fixture before another test. `--runtime` combines engine and runtime suites.
+`tools/deploy-smoke.py --isolation` also covers standalone decompile/assemble/buffer
+analysis and restores both applications' enabled states in `finally`.
+
+PosEdMCP's Special settings now offers separate ColorOS and HyperOS “帮助Deploy”
+scripts. They match only dev.deploy and its colon subprocesses on known cleaner
+paths; manual force-stop remains available. Defaults remain off. New independent
+hook ownership requires the updated system_server module (normally after reboot).
+Synthetic Lua/registry tests are in PosEdMCP `tests/run-hooks.ps1`; they do not prove
+all ROM method signatures or versions. See MILESTONE-0.4.md for verified scope.

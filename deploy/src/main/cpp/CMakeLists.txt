@@ -45,12 +45,28 @@ set(CAPSTONE_BUILD_LEGACY_TESTS OFF CACHE BOOL "" FORCE)
 set(CAPSTONE_INSTALL OFF CACHE BOOL "" FORCE)
 add_subdirectory("${DEPLOY_THIRD_PARTY_DIR}/capstone" "${CMAKE_CURRENT_BINARY_DIR}/capstone")
 
+set(BUILD_LIBS_ONLY ON CACHE BOOL "" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(LLVM_TARGETS_TO_BUILD "AArch64;ARM;X86" CACHE STRING "" FORCE)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+add_subdirectory("${DEPLOY_THIRD_PARTY_DIR}/keystone" "${CMAKE_CURRENT_BINARY_DIR}/keystone" EXCLUDE_FROM_ALL)
+set_target_properties(keystone PROPERTIES CXX_STANDARD 11)
+
+set(GHIDRA_CPP "${DEPLOY_THIRD_PARTY_DIR}/ghidra/Ghidra/Features/Decompiler/src/decompile/cpp")
+include("${DEPLOY_THIRD_PARTY_DIR}/../cmake/GhidraSources.cmake")
+ghidra_sources(GHIDRA_SOURCES ${GHIDRA_CORE} ${GHIDRA_SLEIGH} ${GHIDRA_DECOMP})
+# An object library retains the static capability registrations used by PrintC.
+add_library(deployghidra OBJECT ${GHIDRA_SOURCES})
+target_compile_features(deployghidra PRIVATE cxx_std_17)
+target_include_directories(deployghidra PUBLIC "${GHIDRA_CPP}")
+
 # The analysis backend. LIEF is statically linked into this JNI library so the
 # Java/AIDL/MCP seam remains unchanged when more ELF operations are added.
-add_library(deploynative SHARED deploynative.cpp)
+add_library(deploynative SHARED deploynative.cpp decompiler.cpp assembler.cpp)
 
 target_compile_features(deploynative PRIVATE cxx_std_17)
-target_link_libraries(deploynative PRIVATE LIEF::LIEF capstone_static)
+target_link_libraries(deploynative PRIVATE LIEF::LIEF capstone_static keystone deployghidra z)
+target_include_directories(deploynative PRIVATE "${DEPLOY_THIRD_PARTY_DIR}/keystone/include")
 target_include_directories(deploynative PRIVATE "${DEPLOY_THIRD_PARTY_DIR}/capstone/include")
 
 find_library(log-lib log)

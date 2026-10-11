@@ -18,6 +18,10 @@ dist/
 # Pinned upstream sources are prepared locally; see third_party/README.md.
 /third_party/LIEF/
 /third_party/capstone/
+/third_party/ghidra/
+/third_party/keystone/
+/third_party/zlib/
+/deploy/src/main/assets/ghidra/
 
 # Local device evidence and generated architecture samples, not source inputs.
 /smoke-*.json

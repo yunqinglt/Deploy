@@ -115,7 +115,7 @@ public final class DeployMcpServer {
                 body = "{\"error\":\"no such endpoint\"}".getBytes(StandardCharsets.UTF_8);
                 status = "404 Not Found";
             } else if (!"POST".equals(request.method)) {
-                body = "{\"error\":\"POST only; no SSE stream in this stub\"}"
+                body = "{\"error\":\"POST only; no SSE stream\"}"
                         .getBytes(StandardCharsets.UTF_8);
                 status = "405 Method Not Allowed";
             } else if (!authorized(request)) {
@@ -253,7 +253,8 @@ public final class DeployMcpServer {
                 + " on disk. It is read-only and non-root: name a file with 'path' that the app"
                 + " can read, typically something already copied to /sdcard. The 'op' argument"
                 + " selects the layer - overview, symbols, relocations, strings, metadata, or"
-                + " resolve. disasm returns Capstone instructions; decompile reports unavailable.");
+                + " resolve. disasm returns Capstone instructions; decompile uses Ghidra for AArch64 C pseudocode."
+                + " deploy_assemble returns Keystone bytes without executing them; deploy_analyze_bytes decodes a byte buffer.");
         return result;
     }
 
@@ -264,9 +265,14 @@ public final class DeployMcpServer {
                 + " backend. Read-only.", new JSONObject()));
         JSONObject props = dev.deploy.api.DeployContract.analysisProperties();
         array.put(tool("deploy_analyze", "Analyze an ELF shared object",
-                "LIEF ELF analysis and Capstone disasm; decompile is reserved"
-                + " for a future pseudocode engine. Read-only.",
+                "LIEF ELF analysis, Capstone disassembly and Ghidra AArch64 C pseudocode. Read-only.",
                 props));
+        array.put(tool("deploy_assemble", "Assemble native instructions",
+                "Keystone assembler. Returns hex bytes; does not write memory or execute code.",
+                dev.deploy.api.DeployContract.assemblyProperties()));
+        array.put(tool("deploy_analyze_bytes", "Disassemble a byte buffer",
+                "Decode 1..4096 bytes using Capstone at the supplied virtual address. No process access.",
+                dev.deploy.api.DeployContract.bufferProperties()));
         JSONObject result = new JSONObject();
         result.put("tools", array);
         return result;
@@ -290,6 +296,8 @@ public final class DeployMcpServer {
         schema.put("properties", props == null ? new JSONObject() : props);
         schema.put("additionalProperties", false);
         if ("deploy_analyze".equals(name)) schema.put("required", new JSONArray().put("path"));
+        if ("deploy_assemble".equals(name)) schema.put("required", new JSONArray().put("arch").put("source"));
+        if ("deploy_analyze_bytes".equals(name)) schema.put("required", new JSONArray().put("arch").put("bytes"));
         o.put("inputSchema", schema);
         return o;
     }
@@ -305,6 +313,12 @@ public final class DeployMcpServer {
             switch (name) {
                 case "deploy_status":
                     return core.status();
+                case "deploy_assemble":
+                    return core.assemble(finalArgs.getString("arch"), finalArgs.getString("source"),
+                            finalArgs.optString("address", "0x0"));
+                case "deploy_analyze_bytes":
+                    return core.disassembleBytes(DeployCore.decodeHex(finalArgs.getString("bytes")),
+                            finalArgs.getString("arch"), finalArgs.optString("address", "0x0"), finalArgs);
                 case "deploy_analyze": {
                     String path = finalArgs.optString("path", "");
                     if (path.trim().isEmpty()) {

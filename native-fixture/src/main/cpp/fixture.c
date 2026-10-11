@@ -15,3 +15,8 @@ __attribute__((visibility("default"))) int64_t deploy_fixture_probe(void) {
 __attribute__((visibility("default"))) int64_t deploy_fixture_answer(void) {
     return 42;
 }
+
+__attribute__((visibility("default"), noinline)) int64_t deploy_fixture_calculate(int64_t x) {
+    if (x < 0) return -x;
+    return x * 3 + 7;
+}

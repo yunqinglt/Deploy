@@ -1,0 +1,13 @@
+Deploy native dependencies (pinned revisions and source URLs in third_party/README.md):
+
+LIEF: Apache-2.0. Local CMake minimum-version compatibility patch only.
+Ghidra: Apache-2.0. Native decompiler and AArch64 SLEIGH language from 11.3.2.
+Capstone: BSD-style licenses; retained Capstone and LLVM license texts.
+Keystone: GPLv2, with EXCEPTIONS-CLIENT for listed FOSS client licenses.
+The exception is conditional, not a blanket permission for closed-source clients.
+Keystone's embedded LLVM: University of Illinois/NCSA license.
+zlib: zlib license. Bundled source is used by the host SLEIGH compiler only;
+Android decompilation links the platform libz.
+
+These notices do not grant a project license to Deploy. The project has not
+selected a distribution license. Original license texts accompany this notice.
